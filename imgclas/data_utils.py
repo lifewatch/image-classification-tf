@@ -8,6 +8,7 @@ Github: ignacioheredia
 """
 
 import os
+import io
 import threading
 from multiprocessing import Pool
 import queue
@@ -18,6 +19,7 @@ import numpy as np
 from tqdm import tqdm
 from tensorflow.keras.utils import to_categorical, Sequence
 import cv2
+from PIL import Image
 import albumentations
 from albumentations.augmentations import transforms
 from albumentations.imgaug import transforms as imgaug_transforms
@@ -106,31 +108,41 @@ def load_image(filename, filemode='local'):
     ----------
     filename : str
         Path or url to the image
-    filemode : {'local','url'}
+    filemode : {'local','url', 'gridfs'}
         - 'local': filename is absolute path in local disk.
         - 'url': filename is internet url.
+        - 'gridfs': input is gridfs.grid_file.GridOut object (pymongo+gridfs)
 
     Returns
     -------
     A numpy array
     """
     if filemode == 'local':
-        image = cv2.imread(filename, cv2.IMREAD_COLOR)
+        image = cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
         if image is None:
             raise ValueError('The local path does not exist or does not correspond to an image: \n {}'.format(filename))
-
+        # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
+        image = np.expand_dims(image, 2)
     elif filemode == 'url':
         try:
             data = urlopen(filename).read()
             data = np.frombuffer(data, np.uint8)
             image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
+
         except:
             raise ValueError('Incorrect url path: \n {}'.format(filename))
 
+    elif filemode == 'gridfs':
+        try:
+            img_jpg = Image.open(io.BytesIO(filename.read()))
+            image = np.array(img_jpg)
+            image = np.expand_dims(image, 2)
+        except:
+            raise ValueError('Incorrect gridfs object: \n {}'.format(filename))
     else:
         raise ValueError('Invalid value for filemode.')
 
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
     return image
 
 
@@ -503,9 +515,10 @@ class k_crop_data_sequence(Sequence):
         mode :str, {'random', 'standard'}
             If 'random' data augmentation is performed randomly.
             If 'standard' we take the standard 10 crops (corners +center + mirrors)
-        filemode : {'local','url'}
+        filemode : {'local','url', 'gridfs'}
             - 'local': filename is absolute path in local disk.
             - 'url': filename is internet url.
+            - 'gridfs': mongodb compatible
         """
         self.inputs = inputs
         self.mean_RGB = mean_RGB
@@ -534,7 +547,10 @@ class k_crop_data_sequence(Sequence):
                 batch_X.append(im_aug)  # shape (N, 224, 224, 3)
 
         if self.crop_mode == 'standard':
-            batch_X = standard_tencrop_batch(im)
+                batch_X = standard_tencrop_batch(im)
+                # Change by Nick, why no resizing here?
+                batch_X = [resize_im(im, height=self.im_size, width=self.im_size) for im in batch_X]
+
 
         batch_X = preprocess_batch(batch=batch_X, mean_RGB=self.mean_RGB, std_RGB=self.std_RGB, mode=self.preprocess_mode)
         return batch_X

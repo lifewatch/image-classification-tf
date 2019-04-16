@@ -25,6 +25,7 @@ import warnings
 from datetime import datetime
 import pkg_resources
 import builtins
+import re
 
 import numpy as np
 import requests
@@ -358,8 +359,8 @@ def get_train_args():
     """
     train_args = {}
     default_conf = config.CONF
-    for group, val in sorted(default_conf.items()):
-        for g_key, g_val in sorted(val.items()):
+    for group, val in default_conf.items():
+        for g_key, g_val in val.items():
             gg_keys = g_val.keys()
 
             # Load optional keys
@@ -368,7 +369,7 @@ def get_train_args():
             choices = g_val['choices'] if ('choices' in gg_keys) else None
 
             # Additional info in help string
-            help += '\n' + "Group name: {}".format(str(group))
+            help += '\n' + "Group name: **{}**".format(str(group))
             if choices: help += '\n' + "Choices: {}".format(str(choices))
             if type: help += '\n' + "Type: {}".format(g_val['type'])
 
@@ -406,5 +407,11 @@ def get_metadata():
             if line.startswith(par):
                 _, value = line.split(": ", 1)
                 meta[par] = value
+
+    # Update information with Docker info (provided as 'CONTAINER_*' env variables)
+    r = re.compile("^CONTAINER_(.*?)$")
+    container_vars = list(filter(r.match, list(os.environ)))
+    for var in container_vars:
+        meta[var.capitalize()] = os.getenv(var)
 
     return meta

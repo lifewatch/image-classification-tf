@@ -13,7 +13,7 @@ This is a plug-and-play tool to train and evaluate an image classifier on a cust
 To start using this framework run:
 
 ```bash
-git clone https://github.com/indigo-dc/image-classification-tf
+git clone https://github.com/deephdc/image-classification-tf
 cd image-classification-tf
 pip install -e .
 ```
@@ -142,8 +142,6 @@ git clone https://github.com/indigo-dc/deepaas
 cd deepaas
 pip install -e .
 ```
-
-
 
 and run `deepaas-run --listen-ip 0.0.0.0`.
 From there you will be able to run training and predictions of this package  using `model_name=imgclas`.

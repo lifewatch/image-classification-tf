@@ -312,7 +312,7 @@ def resize_im(im, height, width):
     return resize_fn(image=im)['image']
 
 
-def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes,
+def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes, filemode='local',
                    im_size=224, shuffle=True):
     """
     Generator to feed Keras fit function
@@ -326,6 +326,10 @@ def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mo
     aug_params : dict
     im_size : int
         Final image size to feed the net's input (eg. 224 for Resnet).
+    filemode : {'local','url', 'gridfs'}
+        - 'local': filename is absolute path in local disk.
+        - 'url': filename is internet url.
+        - 'gridfs': mongodb compatible
 
     Returns
     -------
@@ -348,7 +352,7 @@ def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mo
         excerpt = idxs[start_idx:start_idx + batch_size]
         batch_X = []
         for i in excerpt:
-            im = load_image(inputs[i], filemode='local')
+            im = load_image(inputs[i], filemode=filemode)
             im = augment(im, params=aug_params)
             im = resize_im(im, height=im_size, width=im_size)
             batch_X.append(im)  # shape (N, 224, 224, 3)
@@ -400,7 +404,7 @@ class data_sequence(Sequence):
     TODO: Add sample weights on request
     """
 
-    def __init__(self, inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes,
+    def __init__(self, inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes, filemode='local',
                  im_size=224, shuffle=True):
         """
         Parameters are the same as in the data_generator function
@@ -416,6 +420,7 @@ class data_sequence(Sequence):
         self.preprocess_mode = preprocess_mode
         self.aug_params = aug_params
         self.num_classes = num_classes
+        self.filemode = filemode
         self.im_size = im_size
         self.shuffle = shuffle
         self.on_epoch_end()
@@ -427,7 +432,7 @@ class data_sequence(Sequence):
         batch_idxs = self.indexes[idx*self.batch_size: (idx+1)*self.batch_size]
         batch_X = []
         for i in batch_idxs:
-            im = load_image(self.inputs[i])
+            im = load_image(self.inputs[i], filemode=self.filemode)
             if self.aug_params:
                 im = augment(im, params=self.aug_params)
             im = resize_im(im, height=self.im_size, width=self.im_size)
@@ -558,17 +563,17 @@ class k_crop_data_sequence(Sequence):
         return batch_X
 
 
-def im_stats(filename):
+def im_stats(filename, filemode='gridfs'):
     """
     Helper for function compute_meanRGB
     """
-    im = load_image(filename, filemode='local')
+    im = load_image(filename, filemode=filemode)
     mean = np.mean(im, axis=(0, 1))
     std = np.std(im, axis=(0, 1))
     return mean.tolist(), std.tolist()
 
 
-def compute_meanRGB(im_list, verbose=False, workers=4):
+def compute_meanRGB(im_list, verbose=False, workers=4, filemode='local'):
     """
     Returns the mean and std RGB values for the whole dataset.
     For example in the plantnet dataset we have:

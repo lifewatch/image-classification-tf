@@ -139,7 +139,7 @@ def load_image(filename, filemode='local'):
         try:
             img_jpg = Image.open(io.BytesIO(filename.read()))
             image = np.array(img_jpg)
-            image = np.expand_dims(image, 2)
+            image = np.repeat(image[..., np.newaxis], 3, -1) # make greyscale images "RGB" by copying the same image 3 times
         except:
             raise ValueError('Incorrect gridfs object: \n {}'.format(filename))
     else:

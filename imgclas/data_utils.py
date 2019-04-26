@@ -175,9 +175,9 @@ def preprocess_batch(batch, mean_RGB, std_RGB, mode='tf', channels_first=False):
     if mode == 'caffe':
         batch = batch[:, :, :, ::-1]  # switch from RGB to BGR
     if mode == 'tf':
-        batch /= 127.5 # scaling between [1, -1]
+        batch = batch/127.5 # scaling between [1, -1]
     if mode == 'torch':
-        batch /= std_RGB
+        batch = batch/std_RGB
     if channels_first:
         batch = batch.transpose(0, 3, 1, 2)  # shape(N, 3, 224, 224)
     return batch.astype(np.float32)

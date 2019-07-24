@@ -139,11 +139,14 @@ def load_image(filename, filemode='local'):
         try:
             img_jpg = Image.open(io.BytesIO(filename.read()))
             image = np.array(img_jpg)
-            image = np.repeat(image[..., np.newaxis], 3, -1) # make greyscale images "RGB" by copying the same image 3 times
+            if len(image.shape) != 3:
+                image = np.repeat(image[..., np.newaxis], 3, -1) # make greyscale images "RGB" by copying the same image 3 times
             # reset cursor
             filename.seek(0)
         except:
-            raise ValueError('Incorrect gridfs object: \n {}'.format(filename))
+            raise ValueError('Problem loading gridfs object: \n {}'.format(filename._id))
+
+            # raise ValueError('Incorrect gridfs object: \n {}'.format(filename))
     else:
         raise ValueError('Invalid value for filemode.')
 
@@ -565,14 +568,17 @@ class k_crop_data_sequence(Sequence):
         return batch_X
 
 
-def im_stats(filename, filemode='gridfs'):
+def im_stats(filename, filemode='local'):
     """
     Helper for function compute_meanRGB
     """
     im = load_image(filename, filemode=filemode)
-    mean = np.mean(im, axis=(0, 1))
-    std = np.std(im, axis=(0, 1))
-    return mean.tolist(), std.tolist()
+    if im.all() != None:
+        mean = np.mean(im, axis=(0, 1))
+        std = np.std(im, axis=(0, 1))
+        return mean.tolist(), std.tolist()
+    else:
+        return([None,None])
 
 
 def compute_meanRGB(im_list, verbose=False, workers=4, filemode='local'):
@@ -581,7 +587,6 @@ def compute_meanRGB(im_list, verbose=False, workers=4, filemode='local'):
     For example in the plantnet dataset we have:
         mean_RGB = np.array([ 107.59348955,  112.1047813 ,   80.9982362 ])
         std_RGB = np.array([ 52.78326119,  50.56163087,  50.86486131])
-
     Parameters
     ----------
     im_list : array of strings
@@ -590,27 +595,35 @@ def compute_meanRGB(im_list, verbose=False, workers=4, filemode='local'):
         Show progress bar
     workers: int
         Numbers of parallel workers to perform the computation with.
-
     References
     ----------
     https://stackoverflow.com/questions/41920124/multiprocessing-use-tqdm-to-display-a-progress-bar
     """
-
-    print('Computing mean RGB pixel with {} workers...'.format(workers))
-
-    with Pool(workers) as p:
-        r = list(tqdm(p.imap(im_stats, im_list),
-                      total=len(im_list),
-                      disable=verbose))
-
-    r = np.asarray(r)
-    mean, std = r[:, 0], r[:, 1]
-    mean, std = np.mean(mean, axis=0), np.mean(std, axis=0)
-
-    print('Mean RGB pixel: {}'.format(mean.tolist()))
-    print('Standard deviation of RGB pixel: {}'.format(std.tolist()))
-
+    if filemode != "gridfs":
+        print('Computing mean RGB pixel with {} workers...'.format(workers))
+        with Pool(workers) as p:
+            r = list(tqdm(p.imap(im_stats, im_list),
+                          total=len(im_list),
+                          disable=verbose))
+        r = np.asarray(r)
+        mean, std = r[:, 0], r[:, 1]
+        mean, std = np.mean(mean, axis=0), np.mean(std, axis=0)
+        print('Mean RGB pixel: {}'.format(mean.tolist()))
+        print('Standard deviation of RGB pixel: {}'.format(std.tolist()))
+    else:
+        print('Computing mean pixel values...')
+        mean_l = [None]*len(im_list)
+        std_l = [None]*len(im_list)
+        for i, img in enumerate(im_list):
+            print("{}/{}                    ".format(i, len(im_list)), end="\r")
+            mean_l[i], std_l[i] = im_stats(img, filemode='gridfs')
+        mean, std = np.mean([x for x in mean_l if x != None], axis=0), np.mean([x for x in std_l if x != None], axis=0)
+        print('Mean pixel: {}'.format(mean.tolist()))
+        print('Standard deviation of pixel: {}'.format(std.tolist()))
+        print('number of omitted images that failed loading: {}'.format(mean_l.count(None)) )
     return mean.tolist(), std.tolist()
+
+
 
 
 def compute_classweights(labels, max_dim=None, mode='balanced'):
@@ -631,7 +644,11 @@ def compute_classweights(labels, max_dim=None, mode='balanced'):
     if mode is None:
         return None
 
-    weights = np.bincount(labels)
+    try:
+        weights = np.bincount(labels)
+    except TypeError:
+        _, weights = np.unique(labels, return_counts=True)
+
     weights = np.sum(weights) / weights
 
     # Fill the count if some high number labels are not present in the sample

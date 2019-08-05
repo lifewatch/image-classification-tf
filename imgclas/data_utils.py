@@ -317,8 +317,8 @@ def resize_im(im, height, width):
     return resize_fn(image=im)['image']
 
 
-def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes, filemode='local',
-                   im_size=224, shuffle=True):
+def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes, filemode='local', im_size=224, shuffle=True):
+
     """
     Generator to feed Keras fit function
 
@@ -409,15 +409,19 @@ class data_sequence(Sequence):
     TODO: Add sample weights on request
     """
 
-    def __init__(self, inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes, filemode='local',
-                 im_size=224, shuffle=True):
+    def __init__(self, input_1, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes, 
+                 filemode='local', im_size=224, shuffle=True, input_2=None):
         """
-        Parameters are the same as in the data_generator function
+        Parameters are the same as in the data_generator function except for:
+            - input_2: If not None, input 2 should be array/list/pd.DataFrame() with same length as input_1 (images) containing the metadata parameters to be included in the mixed-input model
         """
-        assert len(inputs) == len(targets)
-        assert len(inputs) >= batch_size
+        assert len(input_1) == len(targets)
+        assert len(input_1) >= batch_size
+        if not input_2 is None:
+            assert len(input_2) == len(input_1)
 
-        self.inputs = inputs
+        self.input_1 = input_1
+        self.input_2 = input_2
         self.targets = targets
         self.batch_size = batch_size
         self.mean_RGB = mean_RGB
@@ -431,27 +435,37 @@ class data_sequence(Sequence):
         self.on_epoch_end()
 
     def __len__(self):
-        return int(np.ceil(len(self.inputs) / float(self.batch_size)))
+        return int(np.ceil(len(self.input_1) / float(self.batch_size)))
 
     def __getitem__(self, idx):
         batch_idxs = self.indexes[idx*self.batch_size: (idx+1)*self.batch_size]
-        batch_X = []
+        batch_X_im = []
+        batch_X_meta = []
         for i in batch_idxs:
-            im = load_image(self.inputs[i], filemode=self.filemode)
+            im = load_image(self.input_1[i], filemode=self.filemode)
             if self.aug_params:
                 im = augment(im, params=self.aug_params)
             im = resize_im(im, height=self.im_size, width=self.im_size)
-            batch_X.append(im)  # shape (N, 224, 224, 3)
-        batch_X = preprocess_batch(batch=batch_X, mean_RGB=self.mean_RGB, std_RGB=self.std_RGB, mode=self.preprocess_mode)
+            batch_X_im.append(im)  # shape (N, 224, 224, 3)
+            if not self.input_2 is None:
+                batch_X_meta.append(self.input_2[i])
+        
+        batch_X_im = preprocess_batch(batch=batch_X_im, mean_RGB=self.mean_RGB, 
+                                      std_RGB=self.std_RGB, mode=self.preprocess_mode)
+        if not self.input_2 is None:
+            batch_X = [np.array(batch_X_meta), batch_X_im]
+        else:
+            batch_X = batch_X_im
+
         batch_y = to_categorical(self.targets[batch_idxs], num_classes=self.num_classes)
         return batch_X, batch_y
 
     def on_epoch_end(self):
         """Updates indexes after each epoch"""
-        self.indexes = np.arange(len(self.inputs))
+        self.indexes = np.arange(len(self.input_1))
         if self.shuffle:
             np.random.shuffle(self.indexes)
-
+            
 
 def standard_tencrop_batch(im, crop_prop=0.9):
     """

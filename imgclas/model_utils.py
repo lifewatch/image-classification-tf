@@ -17,7 +17,7 @@ from tensorflow.keras.models import load_model, Model
 from tensorflow.python.saved_model import builder as saved_model_builder
 from tensorflow.python.saved_model.signature_def_utils import predict_signature_def
 from tensorflow.python.saved_model import tag_constants
-from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Flatten
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Flatten, Activation, BatchNormalization, Dropout
 
 from imgclas import paths
 
@@ -28,7 +28,7 @@ model_modes = {'DenseNet121': 'torch', 'DenseNet169': 'torch', 'DenseNet201': 't
                'ResNet50': 'caffe', 'VGG16': 'caffe', 'VGG19': 'caffe'}
 
 
-def create_model(CONF):
+def create_model(CONF, classification=False, output_layers=512):
     """
     Parameters
     ----------
@@ -43,15 +43,24 @@ def create_model(CONF):
 
     # Add custom layers at the top to adapt it to our problem
     x = base_model.output
-    x = GlobalAveragePooling2D()(x)
-    # x = Flatten()(x) #might work better on large dataset than GlobalAveragePooling https://github.com/keras-team/keras/issues/8470
-    x = Dense(1024,
-              activation='relu')(x)
-    predictions = Dense(CONF['model']['num_classes'],
-                        activation='softmax')(x)
+
+    if classification:
+        x = GlobalAveragePooling2D()(x)
+        # x = Flatten()(x) #might work better on large dataset than GlobalAveragePooling https://github.com/keras-team/keras/issues/8470
+        x = Dense(1024, activation='relu')(x)
+        x = Dense(CONF['model']['num_classes'], activation='softmax')(x)
+    else:
+        x = Flatten()(x)
+        x = Dense(1024)(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization(axis=-1)(x)
+        x = Dense(output_layers)(x)
+        x = Activation("relu")(x)
+        x = BatchNormalization(axis=-1)(x)
+        x = Dropout(0.5)(x)
 
     # Full model
-    model = Model(inputs=base_model.input, outputs=predictions)
+    model = Model(inputs=base_model.input, outputs=x)
 
     # Add L2 reguralization for all the layers in the whole model
     if CONF['training']['l2_reg']:

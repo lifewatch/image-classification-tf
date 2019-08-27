@@ -101,6 +101,24 @@ def load_class_info(splits_dir):
     class_info = np.genfromtxt(os.path.join(splits_dir, 'info.txt'), dtype='str', delimiter='/n')
     return class_info
 
+def crop_zooscan_img(zooim, w, h):
+    """
+    Function to crop zooscan image by finding top-left crosshair
+    """
+    image = zooim[:-17,:,0]
+    im_thr = image.copy() #-17 is to cut off lower border
+    im_thr[im_thr>0] = 255 #max threshold
+    im_thr = im_thr[:, (np.sum(im_thr, axis=0) != 0)] # remove columns all black = artificial line
+    im_thr = im_thr[(np.sum(im_thr, axis=1) != 0), :] # remove rows all black = artificial line
+    
+    thr =np.where(im_thr<1)
+    if np.sum(thr) > 0:
+        Y = thr[0][0]
+        X = thr[1][0]
+        # in the crop we take -1 pixel inwards to make sure no border remains.
+        image = zooim[ Y+1:int(Y+h-1),X+1:int(X+w-1), :]
+    return(image)
+
 
 def load_image(filename, filemode='local'):
     """
@@ -139,6 +157,11 @@ def load_image(filename, filemode='local'):
         try:
             img_jpg = Image.open(io.BytesIO(filename.read()))
             image = np.array(img_jpg)
+            # If zooscan we need to crop
+            if filename.metadata:
+                h = filename.metadata["processing_data"]["Height"]
+                w = filename.metadata["processing_data"]["Width"]
+                image = crop_zooscan_img(image, w, h)
             if len(image.shape) != 3:
                 image = np.repeat(image[..., np.newaxis], 3, -1) # make greyscale images "RGB" by copying the same image 3 times
             # reset cursor

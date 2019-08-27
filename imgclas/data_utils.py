@@ -15,6 +15,7 @@ import queue
 from urllib.request import urlopen
 import subprocess
 import warnings
+from PIL import Image, ImageEnhance
 
 import numpy as np
 from tqdm import tqdm
@@ -24,6 +25,7 @@ from PIL import Image
 import albumentations
 from albumentations.augmentations import transforms
 from albumentations.imgaug import transforms as imgaug_transforms
+
 
 
 def load_data_splits(splits_dir, im_dir, split_name='train'):
@@ -143,6 +145,8 @@ def load_image(filename, filemode='local'):
             raise ValueError('The local path does not exist or does not correspond to an image: \n {}'.format(filename))
         # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
         image = np.expand_dims(image, 2)
+        if image.shape[2] == 1: # if greyscale (X,X,1) -> (X,X,3)
+            image = np.repeat(image, 3, -1)
     elif filemode == 'url':
         try:
             data = urlopen(filename).read()
@@ -224,7 +228,9 @@ def augment(im, params=None):
         - rot ([0,1] float):  probability of performing a rotation to the image.
         - rot_lim (int):  max degrees of rotation.
         - stretch ([0,1] float):  probability of randomly stretching an image.
+        - expand ([True, False] bool): whether to pad the image to a square shape with background color canvas.
         - crop ([0,1] float): randomly take an image crop.
+        - invert_col ([0, 1] float): randomly invert the colors of the image. p=1 -> invert colors (VPR)
         - zoom ([0,1] float): random zoom applied to crop_size.
             --> Therefore the effective crop size at each iteration will be a
                 random number between 1 and crop*(1-zoom). For example:
@@ -242,25 +248,58 @@ def augment(im, params=None):
     -------
     Numpy array
     """
+    ## 1) Expand the image by padding it with bg-color canvas
+    if params["expand"]:
+        desired_size = max(im.shape)
+        # check bg
+        if np.argmax(im.shape) >0:
+            bgcol = tuple(np.repeat(int(np.mean(im[[0, -1], :, :])),3))
+        else:
+            bgcol = tuple(np.repeat(int(np.mean(im[:, [0, -1], :])),3))
 
-    ## 1) Crop the image
-    effective_zoom = np.random.rand() * params['zoom']
-    crop = params['crop'] - effective_zoom
+        im = Image.fromarray(im)
+        old_size = im.size  # old_size[0] is in (width, height) format
 
-    ly, lx, channels = im.shape
-    crop_size = int(crop * min([ly, lx]))
-    rand_x = np.random.randint(low=0, high=lx - crop_size + 1)
-    rand_y = np.random.randint(low=0, high=ly - crop_size + 1)
+        ratio = float(desired_size)/max(old_size)
+        new_size = tuple([int(x*ratio) for x in old_size])
+        im = im.resize(new_size, Image.ANTIALIAS)
+        # create a new image and paste the resized on it
+        new_im = Image.new("RGB", (desired_size, desired_size), color = bgcol)
+        new_im.paste(im, ((desired_size-new_size[0])//2,
+                            (desired_size-new_size[1])//2))
 
-    crop = transforms.Crop(x_min=rand_x,
-                           y_min=rand_y,
-                           x_max=rand_x + crop_size,
-                           y_max=rand_y + crop_size)
+        im = np.array(new_im)
 
-    im = crop(image=im)['image']
+    ## 2) Crop the image
+    if params["crop"] and params["crop"] != 1:
+        effective_zoom = np.random.rand() * params['zoom']
+        crop = params['crop'] - effective_zoom
 
-    ## 2) Now add the transformations for augmenting the image pixels
+        ly, lx, channels = im.shape
+        crop_size = int(crop * min([ly, lx]))
+        rand_x = np.random.randint(low=0, high=lx - crop_size + 1)
+        rand_y = np.random.randint(low=0, high=ly - crop_size + 1)
+
+        crop = transforms.Crop(x_min=rand_x,
+                               y_min=rand_y,
+                               x_max=rand_x + crop_size,
+                               y_max=rand_y + crop_size)
+
+        im = crop(image=im)['image']
+
+
+    if params["enhance"]:
+        im = Image.fromarray(im)
+        enhancer = ImageEnhance.Contrast(im)
+        im = np.array(enhancer.enhance(params["enhance"]))
+
+    ## 3) Now add the transformations for augmenting the image pixels
     transform_list = []
+
+    if params['invert_col']:
+        transform_list.append(
+             transforms.InvertImg(p=params['invert_col'])
+        )
 
     # Add random stretching
     if params['stretch']:
@@ -335,7 +374,7 @@ def augment(im, params=None):
     return im
 
 
-def resize_im(im, height, width):
+def resize_im(im, height, width, pad=False):
     resize_fn = transforms.Resize(height=height, width=width)
     return resize_fn(image=im)['image']
 

@@ -471,7 +471,7 @@ class data_sequence(Sequence):
     TODO: Add sample weights on request
     """
 
-    def __init__(self, input_1, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes, 
+    def __init__(self, input_1, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes,
                  filemode='local', im_size=224, shuffle=True, input_2=None):
         """
         Parameters are the same as in the data_generator function except for:
@@ -511,8 +511,8 @@ class data_sequence(Sequence):
             batch_X_im.append(im)  # shape (N, 224, 224, 3)
             if not self.input_2 is None:
                 batch_X_meta.append(self.input_2[i])
-        
-        batch_X_im = preprocess_batch(batch=batch_X_im, mean_RGB=self.mean_RGB, 
+
+        batch_X_im = preprocess_batch(batch=batch_X_im, mean_RGB=self.mean_RGB,
                                       std_RGB=self.std_RGB, mode=self.preprocess_mode)
         if not self.input_2 is None:
             batch_X = [np.array(batch_X_meta), batch_X_im]
@@ -527,7 +527,7 @@ class data_sequence(Sequence):
         self.indexes = np.arange(len(self.input_1))
         if self.shuffle:
             np.random.shuffle(self.indexes)
-            
+
 
 def standard_tencrop_batch(im, crop_prop=0.9):
     """

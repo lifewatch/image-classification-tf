@@ -8,20 +8,24 @@ Github: ignacioheredia
 """
 
 import os
+import io
 import threading
 from multiprocessing import Pool
 import queue
 import subprocess
 import warnings
+from PIL import Image, ImageEnhance
 
 import numpy as np
 import requests
 from tqdm import tqdm
 from tensorflow.keras.utils import to_categorical, Sequence
 import cv2
+from PIL import Image
 import albumentations
 from albumentations.augmentations import transforms
 from albumentations.imgaug import transforms as imgaug_transforms
+
 
 
 def load_data_splits(splits_dir, im_dir, split_name='train'):
@@ -99,6 +103,24 @@ def load_class_info(splits_dir):
     class_info = np.genfromtxt(os.path.join(splits_dir, 'info.txt'), dtype='str', delimiter='/n')
     return class_info
 
+def crop_zooscan_img(zooim, w, h):
+    """
+    Function to crop zooscan image by finding top-left crosshair
+    """
+    image = zooim[:-17,:,0]
+    im_thr = image.copy() #-17 is to cut off lower border
+    im_thr[im_thr>0] = 255 #max threshold
+    im_thr = im_thr[:, (np.sum(im_thr, axis=0) != 0)] # remove columns all black = artificial line
+    im_thr = im_thr[(np.sum(im_thr, axis=1) != 0), :] # remove rows all black = artificial line
+    
+    thr =np.where(im_thr<1)
+    if np.sum(thr) > 0:
+        Y = thr[0][0]
+        X = thr[1][0]
+        # in the crop we take -1 pixel inwards to make sure no border remains.
+        image = zooim[ Y+1:int(Y+h-1),X+1:int(X+w-1), :]
+    return(image)
+
 
 def load_image(filename, filemode='local'):
     """
@@ -108,31 +130,53 @@ def load_image(filename, filemode='local'):
     ----------
     filename : str
         Path or url to the image
-    filemode : {'local','url'}
+    filemode : {'local','url', 'gridfs'}
         - 'local': filename is absolute path in local disk.
         - 'url': filename is internet url.
+        - 'gridfs': input is gridfs.grid_file.GridOut object (pymongo+gridfs)
 
     Returns
     -------
     A numpy array
     """
     if filemode == 'local':
-        image = cv2.imread(filename, cv2.IMREAD_COLOR)
+        image = cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
         if image is None:
             raise ValueError('The local path does not exist or does not correspond to an image: \n {}'.format(filename))
-
+        # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
+        image = np.expand_dims(image, 2)
+        if image.shape[2] == 1: # if greyscale (X,X,1) -> (X,X,3)
+            image = np.repeat(image, 3, -1)
     elif filemode == 'url':
         try:
             data = requests.get(filename).content
             data = np.frombuffer(data, np.uint8)
             image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
+
         except:
             raise ValueError('Incorrect url path: \n {}'.format(filename))
 
+    elif filemode == 'gridfs':
+        try:
+            img_jpg = Image.open(io.BytesIO(filename.read()))
+            image = np.array(img_jpg)
+            # If zooscan we need to crop
+            if filename.metadata:
+                h = filename.metadata["processing_data"]["Height"]
+                w = filename.metadata["processing_data"]["Width"]
+                image = crop_zooscan_img(image, w, h)
+            if len(image.shape) != 3:
+                image = np.repeat(image[..., np.newaxis], 3, -1) # make greyscale images "RGB" by copying the same image 3 times
+            # reset cursor
+            filename.seek(0)
+        except:
+            raise ValueError('Problem loading gridfs object: \n {}'.format(filename._id))
+
+            # raise ValueError('Incorrect gridfs object: \n {}'.format(filename))
     else:
         raise ValueError('Invalid value for filemode.')
 
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
     return image
 
 
@@ -161,9 +205,9 @@ def preprocess_batch(batch, mean_RGB, std_RGB, mode='tf', channels_first=False):
     if mode == 'caffe':
         batch = batch[:, :, :, ::-1]  # switch from RGB to BGR
     if mode == 'tf':
-        batch /= 127.5 # scaling between [1, -1]
+        batch = batch/127.5 # scaling between [1, -1]
     if mode == 'torch':
-        batch /= std_RGB
+        batch = batch/std_RGB
     if channels_first:
         batch = batch.transpose(0, 3, 1, 2)  # shape(N, 3, 224, 224)
     return batch.astype(np.float32)
@@ -184,7 +228,9 @@ def augment(im, params=None):
         - rot ([0,1] float):  probability of performing a rotation to the image.
         - rot_lim (int):  max degrees of rotation.
         - stretch ([0,1] float):  probability of randomly stretching an image.
+        - expand ([True, False] bool): whether to pad the image to a square shape with background color canvas.
         - crop ([0,1] float): randomly take an image crop.
+        - invert_col ([0, 1] float): randomly invert the colors of the image. p=1 -> invert colors (VPR)
         - zoom ([0,1] float): random zoom applied to crop_size.
             --> Therefore the effective crop size at each iteration will be a
                 random number between 1 and crop*(1-zoom). For example:
@@ -202,25 +248,58 @@ def augment(im, params=None):
     -------
     Numpy array
     """
+    ## 1) Expand the image by padding it with bg-color canvas
+    if params["expand"]:
+        desired_size = max(im.shape)
+        # check bg
+        if np.argmax(im.shape) >0:
+            bgcol = tuple(np.repeat(int(np.mean(im[[0, -1], :, :])),3))
+        else:
+            bgcol = tuple(np.repeat(int(np.mean(im[:, [0, -1], :])),3))
 
-    ## 1) Crop the image
-    effective_zoom = np.random.rand() * params['zoom']
-    crop = params['crop'] - effective_zoom
+        im = Image.fromarray(im)
+        old_size = im.size  # old_size[0] is in (width, height) format
 
-    ly, lx, channels = im.shape
-    crop_size = int(crop * min([ly, lx]))
-    rand_x = np.random.randint(low=0, high=lx - crop_size + 1)
-    rand_y = np.random.randint(low=0, high=ly - crop_size + 1)
+        ratio = float(desired_size)/max(old_size)
+        new_size = tuple([int(x*ratio) for x in old_size])
+        im = im.resize(new_size, Image.ANTIALIAS)
+        # create a new image and paste the resized on it
+        new_im = Image.new("RGB", (desired_size, desired_size), color = bgcol)
+        new_im.paste(im, ((desired_size-new_size[0])//2,
+                            (desired_size-new_size[1])//2))
 
-    crop = transforms.Crop(x_min=rand_x,
-                           y_min=rand_y,
-                           x_max=rand_x + crop_size,
-                           y_max=rand_y + crop_size)
+        im = np.array(new_im)
 
-    im = crop(image=im)['image']
+    ## 2) Crop the image
+    if params["crop"] and params["crop"] != 1:
+        effective_zoom = np.random.rand() * params['zoom']
+        crop = params['crop'] - effective_zoom
 
-    ## 2) Now add the transformations for augmenting the image pixels
+        ly, lx, channels = im.shape
+        crop_size = int(crop * min([ly, lx]))
+        rand_x = np.random.randint(low=0, high=lx - crop_size + 1)
+        rand_y = np.random.randint(low=0, high=ly - crop_size + 1)
+
+        crop = transforms.Crop(x_min=rand_x,
+                               y_min=rand_y,
+                               x_max=rand_x + crop_size,
+                               y_max=rand_y + crop_size)
+
+        im = crop(image=im)['image']
+
+
+    if params["enhance"]:
+        im = Image.fromarray(im)
+        enhancer = ImageEnhance.Contrast(im)
+        im = np.array(enhancer.enhance(params["enhance"]))
+
+    ## 3) Now add the transformations for augmenting the image pixels
     transform_list = []
+
+    if params['invert_col']:
+        transform_list.append(
+             transforms.InvertImg(p=params['invert_col'])
+        )
 
     # Add random stretching
     if params['stretch']:
@@ -295,13 +374,13 @@ def augment(im, params=None):
     return im
 
 
-def resize_im(im, height, width):
+def resize_im(im, height, width, pad=False):
     resize_fn = transforms.Resize(height=height, width=width)
     return resize_fn(image=im)['image']
 
 
-def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes,
-                   im_size=224, shuffle=True):
+def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes, filemode='local', im_size=224, shuffle=True):
+
     """
     Generator to feed Keras fit function
 
@@ -314,6 +393,10 @@ def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mo
     aug_params : dict
     im_size : int
         Final image size to feed the net's input (eg. 224 for Resnet).
+    filemode : {'local','url', 'gridfs'}
+        - 'local': filename is absolute path in local disk.
+        - 'url': filename is internet url.
+        - 'gridfs': mongodb compatible
 
     Returns
     -------
@@ -336,7 +419,7 @@ def data_generator(inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mo
         excerpt = idxs[start_idx:start_idx + batch_size]
         batch_X = []
         for i in excerpt:
-            im = load_image(inputs[i], filemode='local')
+            im = load_image(inputs[i], filemode=filemode)
             im = augment(im, params=aug_params)
             im = resize_im(im, height=im_size, width=im_size)
             batch_X.append(im)  # shape (N, 224, 224, 3)
@@ -388,15 +471,19 @@ class data_sequence(Sequence):
     TODO: Add sample weights on request
     """
 
-    def __init__(self, inputs, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes,
-                 im_size=224, shuffle=True):
+    def __init__(self, input_1, targets, batch_size, mean_RGB, std_RGB, preprocess_mode, aug_params, num_classes,
+                 filemode='local', im_size=224, shuffle=True, input_2=None):
         """
-        Parameters are the same as in the data_generator function
+        Parameters are the same as in the data_generator function except for:
+            - input_2: If not None, input 2 should be array/list/pd.DataFrame() with same length as input_1 (images) containing the metadata parameters to be included in the mixed-input model
         """
-        assert len(inputs) == len(targets)
-        assert len(inputs) >= batch_size
+        assert len(input_1) == len(targets)
+        assert len(input_1) >= batch_size
+        if not input_2 is None:
+            assert len(input_2) == len(input_1)
 
-        self.inputs = inputs
+        self.input_1 = input_1
+        self.input_2 = input_2
         self.targets = targets
         self.batch_size = batch_size
         self.mean_RGB = mean_RGB
@@ -404,29 +491,40 @@ class data_sequence(Sequence):
         self.preprocess_mode = preprocess_mode
         self.aug_params = aug_params
         self.num_classes = num_classes
+        self.filemode = filemode
         self.im_size = im_size
         self.shuffle = shuffle
         self.on_epoch_end()
 
     def __len__(self):
-        return int(np.ceil(len(self.inputs) / float(self.batch_size)))
+        return int(np.ceil(len(self.input_1) / float(self.batch_size)))
 
     def __getitem__(self, idx):
         batch_idxs = self.indexes[idx*self.batch_size: (idx+1)*self.batch_size]
-        batch_X = []
+        batch_X_im = []
+        batch_X_meta = []
         for i in batch_idxs:
-            im = load_image(self.inputs[i])
+            im = load_image(self.input_1[i], filemode=self.filemode)
             if self.aug_params:
                 im = augment(im, params=self.aug_params)
             im = resize_im(im, height=self.im_size, width=self.im_size)
-            batch_X.append(im)  # shape (N, 224, 224, 3)
-        batch_X = preprocess_batch(batch=batch_X, mean_RGB=self.mean_RGB, std_RGB=self.std_RGB, mode=self.preprocess_mode)
+            batch_X_im.append(im)  # shape (N, 224, 224, 3)
+            if not self.input_2 is None:
+                batch_X_meta.append(self.input_2[i])
+
+        batch_X_im = preprocess_batch(batch=batch_X_im, mean_RGB=self.mean_RGB,
+                                      std_RGB=self.std_RGB, mode=self.preprocess_mode)
+        if not self.input_2 is None:
+            batch_X = [np.array(batch_X_meta), batch_X_im]
+        else:
+            batch_X = batch_X_im
+
         batch_y = to_categorical(self.targets[batch_idxs], num_classes=self.num_classes)
         return batch_X, batch_y
 
     def on_epoch_end(self):
         """Updates indexes after each epoch"""
-        self.indexes = np.arange(len(self.inputs))
+        self.indexes = np.arange(len(self.input_1))
         if self.shuffle:
             np.random.shuffle(self.indexes)
 
@@ -505,9 +603,10 @@ class k_crop_data_sequence(Sequence):
         mode :str, {'random', 'standard'}
             If 'random' data augmentation is performed randomly.
             If 'standard' we take the standard 10 crops (corners +center + mirrors)
-        filemode : {'local','url'}
+        filemode : {'local','url', 'gridfs'}
             - 'local': filename is absolute path in local disk.
             - 'url': filename is internet url.
+            - 'gridfs': mongodb compatible
         """
         self.inputs = inputs
         self.mean_RGB = mean_RGB
@@ -536,29 +635,34 @@ class k_crop_data_sequence(Sequence):
                 batch_X.append(im_aug)  # shape (N, 224, 224, 3)
 
         if self.crop_mode == 'standard':
-            batch_X = standard_tencrop_batch(im)
+                batch_X = standard_tencrop_batch(im)
+                # Change by Nick, why no resizing here?
+                batch_X = [resize_im(im, height=self.im_size, width=self.im_size) for im in batch_X]
+
 
         batch_X = preprocess_batch(batch=batch_X, mean_RGB=self.mean_RGB, std_RGB=self.std_RGB, mode=self.preprocess_mode)
         return batch_X
 
 
-def im_stats(filename):
+def im_stats(filename, filemode='local'):
     """
     Helper for function compute_meanRGB
     """
-    im = load_image(filename, filemode='local')
-    mean = np.mean(im, axis=(0, 1))
-    std = np.std(im, axis=(0, 1))
-    return mean.tolist(), std.tolist()
+    im = load_image(filename, filemode=filemode)
+    if im.all() != None:
+        mean = np.mean(im, axis=(0, 1))
+        std = np.std(im, axis=(0, 1))
+        return mean.tolist(), std.tolist()
+    else:
+        return([None,None])
 
 
-def compute_meanRGB(im_list, verbose=False, workers=4):
+def compute_meanRGB(im_list, verbose=False, workers=4, filemode='local'):
     """
     Returns the mean and std RGB values for the whole dataset.
     For example in the plantnet dataset we have:
         mean_RGB = np.array([ 107.59348955,  112.1047813 ,   80.9982362 ])
         std_RGB = np.array([ 52.78326119,  50.56163087,  50.86486131])
-
     Parameters
     ----------
     im_list : array of strings
@@ -567,27 +671,35 @@ def compute_meanRGB(im_list, verbose=False, workers=4):
         Show progress bar
     workers: int
         Numbers of parallel workers to perform the computation with.
-
     References
     ----------
     https://stackoverflow.com/questions/41920124/multiprocessing-use-tqdm-to-display-a-progress-bar
     """
-
-    print('Computing mean RGB pixel with {} workers...'.format(workers))
-
-    with Pool(workers) as p:
-        r = list(tqdm(p.imap(im_stats, im_list),
-                      total=len(im_list),
-                      disable=verbose))
-
-    r = np.asarray(r)
-    mean, std = r[:, 0], r[:, 1]
-    mean, std = np.mean(mean, axis=0), np.mean(std, axis=0)
-
-    print('Mean RGB pixel: {}'.format(mean.tolist()))
-    print('Standard deviation of RGB pixel: {}'.format(std.tolist()))
-
+    if filemode != "gridfs":
+        print('Computing mean RGB pixel with {} workers...'.format(workers))
+        with Pool(workers) as p:
+            r = list(tqdm(p.imap(im_stats, im_list),
+                          total=len(im_list),
+                          disable=verbose))
+        r = np.asarray(r)
+        mean, std = r[:, 0], r[:, 1]
+        mean, std = np.mean(mean, axis=0), np.mean(std, axis=0)
+        print('Mean RGB pixel: {}'.format(mean.tolist()))
+        print('Standard deviation of RGB pixel: {}'.format(std.tolist()))
+    else:
+        print('Computing mean pixel values...')
+        mean_l = [None]*len(im_list)
+        std_l = [None]*len(im_list)
+        for i, img in enumerate(im_list):
+            print("{}/{}                    ".format(i, len(im_list)), end="\r")
+            mean_l[i], std_l[i] = im_stats(img, filemode='gridfs')
+        mean, std = np.mean([x for x in mean_l if x != None], axis=0), np.mean([x for x in std_l if x != None], axis=0)
+        print('Mean pixel: {}'.format(mean.tolist()))
+        print('Standard deviation of pixel: {}'.format(std.tolist()))
+        print('number of omitted images that failed loading: {}'.format(mean_l.count(None)) )
     return mean.tolist(), std.tolist()
+
+
 
 
 def compute_classweights(labels, max_dim=None, mode='balanced'):
@@ -608,7 +720,11 @@ def compute_classweights(labels, max_dim=None, mode='balanced'):
     if mode is None:
         return None
 
-    weights = np.bincount(labels)
+    try:
+        weights = np.bincount(labels)
+    except TypeError:
+        _, weights = np.unique(labels, return_counts=True)
+
     weights = np.sum(weights) / weights
 
     # Fill the count if some high number labels are not present in the sample

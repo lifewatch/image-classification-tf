@@ -145,3 +145,4 @@ GTAGS
 imgclas/webpage/templates/labels.html
 
 
+*.ipynb

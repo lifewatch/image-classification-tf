@@ -12,7 +12,7 @@ import numpy as np
 from imgclas.data_utils import k_crop_data_sequence
 
 
-def predict(model, X, conf, top_K=None, crop_num=10, filemode='local', merge=False, use_multiprocessing=True):
+def predict(model, X, conf, top_K=None, crop_num=10, filemode='local', merge=False, crop_mode='random'):
     """
     Predict function.
 
@@ -56,12 +56,12 @@ def predict(model, X, conf, top_K=None, crop_num=10, filemode='local', merge=Fal
                                     std_RGB=conf['dataset']['std_RGB'],
                                     preprocess_mode=conf['model']['preprocess_mode'],
                                     aug_params=conf['augmentation']['val_mode'],
-                                    crop_mode='random',
+                                    crop_mode=crop_mode,
                                     crop_number=crop_num,
                                     filemode=filemode)
 
-    output = model.predict_generator(generator=data_gen, verbose=1,
-                                     max_queue_size=10, workers=4, use_multiprocessing=use_multiprocessing)
+    # output = model.predict_generator(generator=data_gen, verbose=1, max_queue_size=10, workers=4, use_multiprocessing=True)
+    output = model.predict_generator(generator=data_gen, verbose=1, max_queue_size=10) # multiprocessing gives problems => gets stuck
 
     output = output.reshape(len(X), -1, output.shape[-1])  # reshape to (N, crop_number, num_classes)
     output = np.mean(output, axis=1)  # take the mean across the crops

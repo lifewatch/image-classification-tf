@@ -20,7 +20,7 @@ import numpy as np
 import requests
 from tqdm import tqdm
 from tensorflow.keras.utils import to_categorical, Sequence
-import cv2
+# import cv2
 from PIL import Image
 import albumentations
 from albumentations.augmentations import transforms
@@ -140,7 +140,8 @@ def load_image(filename, filemode='local'):
     A numpy array
     """
     if filemode == 'local':
-        image = cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
+        # image = cv2.imread(filename, cv2.IMREAD_GRAYSCALE)
+        image = Image.open(filename).convert('LA')
         if image is None:
             raise ValueError('The local path does not exist or does not correspond to an image: \n {}'.format(filename))
         # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
@@ -150,9 +151,10 @@ def load_image(filename, filemode='local'):
     elif filemode == 'url':
         try:
             data = requests.get(filename).content
-            data = np.frombuffer(data, np.uint8)
-            image = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
+            # data = np.frombuffer(data, np.uint8)
+            image = Image.open(io.BytesIO(data))
+            # image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            # image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # change from default BGR OpenCV format to Python's RGB format
 
         except:
             raise ValueError('Incorrect url path: \n {}'.format(filename))

@@ -280,3 +280,9 @@ class customAdamW(optimizers.Optimizer):
                   }
         base_config = super().get_config()
         return dict(list(base_config.items()) + list(config.items()))
+
+#from utils
+def get_custom_objects():
+    return {'customSGD': customSGD,
+            'customAdam': customAdam,
+            'customAdamW': customAdamW}

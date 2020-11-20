@@ -163,11 +163,11 @@ def load_image(filename, filemode='local'):
         try:
             img_jpg = Image.open(io.BytesIO(filename.read()))
             image = np.array(img_jpg)
-            # If zooscan we need to crop
-            if filename.metadata:
-                h = filename.metadata["processing_data"]["Height"]
-                w = filename.metadata["processing_data"]["Width"]
-                image = crop_zooscan_img(image, w, h)
+            # # If zooscan we need to crop
+            # if filename.metadata:
+            #     h = filename.metadata["processing_data"]["Height"]
+            #     w = filename.metadata["processing_data"]["Width"]
+            #     image = crop_zooscan_img(image, w, h)
             if len(image.shape) != 3:
                 image = np.repeat(image[..., np.newaxis], 3, -1) # make greyscale images "RGB" by copying the same image 3 times
             # reset cursor

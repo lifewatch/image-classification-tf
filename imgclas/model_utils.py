@@ -11,7 +11,7 @@ import os
 import json
 
 from tensorflow.keras import applications
-from tensorflow.keras import regularizers
+from tensorflow.keras import regularizers, callbacks
 from tensorflow.keras import backend as K
 from tensorflow.keras.models import load_model, Model
 from tensorflow.python.saved_model import builder as saved_model_builder
@@ -19,7 +19,8 @@ from tensorflow.python.saved_model.signature_def_utils import predict_signature_
 from tensorflow.python.saved_model import tag_constants
 from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Flatten, Activation, BatchNormalization, Dropout
 
-from imgclas import paths
+import numpy as np
+
 
 
 model_modes = {'DenseNet121': 'torch', 'DenseNet169': 'torch', 'DenseNet201': 'torch',
@@ -120,6 +121,7 @@ def save_conf(conf):
     ----------
     conf : 1-level nested dict
     """
+    from imgclas import paths
     save_dir = paths.get_conf_dir()
 
     # Save dict as json file
@@ -135,3 +137,101 @@ def save_conf(conf):
             txt_file.write("{:<25}{:<30}{:<15} \n".format(key, g_key, str(g_val)))
         txt_file.write('-' * 75 + '\n')
     txt_file.close()
+
+
+class LR_scheduler(callbacks.LearningRateScheduler):
+    """
+    Custom callback to decay the learning rate. Schedule follows a 'step' decay.
+
+    Reference
+    ---------
+    https://github.com/keras-team/keras/issues/898#issuecomment-285995644
+    """
+    def __init__(self, lr_decay=0.1, epoch_milestones=[]):
+        self.lr_decay = lr_decay
+        self.epoch_milestones = epoch_milestones
+        super().__init__(schedule=self.schedule)
+
+    def schedule(self, epoch):
+        current_lr = K.eval(self.model.optimizer.lr)
+        if epoch in self.epoch_milestones:
+            new_lr = current_lr * self.lr_decay
+            print('Decaying the learning rate to {}'.format(new_lr))
+        else:
+            new_lr = current_lr
+        return new_lr
+
+
+class LRHistory(callbacks.Callback):
+    """
+    Custom callback to save the learning rate history
+
+    Reference
+    ---------
+    https://stackoverflow.com/questions/49127214/keras-how-to-output-learning-rate-onto-tensorboard
+    """
+    def __init__(self):  # add other arguments to __init__ if needed
+        super().__init__()
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs.update({'lr': K.eval(self.model.optimizer.lr).astype(np.float64)})
+        super().on_epoch_end(epoch, logs)
+
+
+def get_callbacks(CONF, use_lr_decay=True):
+    """
+    Get a callback list to feed fit_generator.
+    #TODO Use_remote callback needs proper configuration
+    #TODO Add ReduceLROnPlateau callback?
+
+    Parameters
+    ----------
+    CONF: dict
+
+    Returns
+    -------
+    List of callbacks
+    """
+
+    calls = []
+
+    # Add mandatory callbacks
+    calls.append(callbacks.TerminateOnNaN())
+    calls.append(LRHistory())
+
+    # Add optional callbacks
+    if use_lr_decay:
+        milestones = np.array(CONF['training']['lr_step_schedule']) * CONF['training']['epochs']
+        milestones = milestones.astype(np.int)
+        calls.append(LR_scheduler(lr_decay=CONF['training']['lr_step_decay'],
+                                  epoch_milestones=milestones.tolist()))
+
+    # if CONF['monitor']['use_tensorboard']:
+    #     calls.append(callbacks.TensorBoard(log_dir=paths.get_logs_dir(), write_graph=False))
+    #
+    #     # # Let the user launch Tensorboard
+    #     # print('Monitor your training in Tensorboard by executing the following comand on your console:')
+    #     # print('    tensorboard --logdir={}'.format(paths.get_logs_dir()))
+    #     # Run Tensorboard  on a separate Thread/Process on behalf of the user
+    #     port = os.getenv('monitorPORT', 6006)
+    #     port = int(port) if len(str(port)) >= 4 else 6006
+    #     subprocess.run(['fuser', '-k', '{}/tcp'.format(port)]) # kill any previous process in that port
+    #     p = Process(target=launch_tensorboard, args=(port,), daemon=True)
+    #     p.start()
+
+    if CONF['monitor']['use_remote']:
+        calls.append(callbacks.RemoteMonitor())
+
+    if CONF['training']['use_validation'] and CONF['training']['use_early_stopping']:
+        calls.append(callbacks.EarlyStopping(patience=int(0.1 * CONF['training']['epochs'])))
+
+    # if CONF['training']['ckpt_freq'] is not None:
+    #     calls.append(callbacks.ModelCheckpoint(
+    #         os.path.join(paths.get_checkpoints_dir(), 'epoch-{epoch:02d}.hdf5'),
+    #         verbose=1,
+    #         period=max(1, int(CONF['training']['ckpt_freq'] * CONF['training']['epochs']))))
+
+    if not calls:
+        calls = None
+
+    return calls
